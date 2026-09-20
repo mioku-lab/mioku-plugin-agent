@@ -8,14 +8,42 @@ import { bashRequiresApproval } from "./perm";
 const OUTPUT_MAX_CHARS = 20_000;
 const MIN_TIMEOUT_MS = 1_000;
 
-export interface BashNotice {
-  kind: "approval" | "run";
+export interface BashApprovalNotice {
+  id: string;
   command: string;
   cwd: string;
   level: AgentPermissionLevel;
   purpose: string;
   reason?: string;
-  id?: string;
+}
+
+export interface BashRunNotice {
+  command: string;
+  cwd: string;
+  level: AgentPermissionLevel;
+  purpose: string;
+  reason?: string;
+}
+
+export interface BashRunResult {
+  exitCode: number | null;
+  timedOut: boolean;
+  error?: string;
+  stdout?: string;
+  stderr?: string;
+}
+
+export interface BashReporter {
+  /** 需要用户审批时立即通知，任何模式都不延迟。 */
+  approval(notice: BashApprovalNotice): Promise<void>;
+  /** 即将自动执行：full 模式攒进操作流水，其余模式立即通知。 */
+  announce(notice: BashRunNotice): Promise<void>;
+  /** 执行结束：full 模式下写入本回合的操作流水，在最终回复前合并转发。 */
+  record(
+    notice: BashRunNotice,
+    result: BashRunResult,
+    startedAt: number,
+  ): void;
 }
 
 interface BashToolDeps {
@@ -23,7 +51,7 @@ interface BashToolDeps {
   policy: FsPolicy;
   config: BashConfig;
   approvals: ApprovalManager;
-  notify: (notice: BashNotice) => Promise<void>;
+  reporter: BashReporter;
   assessRisk?: (
     command: string,
     purpose: string,
@@ -117,7 +145,7 @@ async function execShell(
 }
 
 export function createBashTool(deps: BashToolDeps): AITool {
-  const { userId, policy, config, approvals, notify } = deps;
+  const { userId, policy, config, approvals, reporter } = deps;
   return {
     name: "bash",
     description:
@@ -127,7 +155,9 @@ export function createBashTool(deps: BashToolDeps): AITool {
         ? `Runs in ${policy.level} mode: each command requires explicit user approval in the chat before execution. Working directory is the workspace (${policy.workspaceRoot}).`
         : policy.level === "auto"
           ? `Runs in auto mode: commands execute without asking first, but every command is reviewed by the working model and destructive ones still require the user's approval. Working directory is the workspace (${policy.workspaceRoot}).`
-          : `Runs in ${policy.level} mode without approval${policy.level === "yolo" ? " and without notifying the user" : ", but every command and its purpose is reported to the user"}. Working directory defaults to the workspace (${policy.workspaceRoot}).`),
+          : policy.level === "yolo"
+            ? `Runs in yolo mode without approval and without notifying the user. Working directory defaults to the workspace (${policy.workspaceRoot}).`
+            : `Runs in full mode without approval; every command and its purpose is collected and reported to the user as one merged record after the turn. Working directory defaults to the workspace (${policy.workspaceRoot}).`),
     parameters: {
       type: "object",
       properties: {
@@ -170,6 +200,14 @@ export function createBashTool(deps: BashToolDeps): AITool {
           ? await deps.assessRisk(command, purpose)
           : { dangerous: false, reason: "" };
 
+      const notice: BashRunNotice = {
+        command,
+        cwd: policy.workspaceRoot,
+        level: policy.level,
+        purpose,
+        reason: verdict.reason,
+      };
+
       if (verdict.dangerous) {
         const { approval, promise } = approvals.create(
           {
@@ -182,15 +220,16 @@ export function createBashTool(deps: BashToolDeps): AITool {
           },
           config.approvalTimeoutMs,
         );
-        await notify({
-          kind: "approval",
-          id: approval.id,
-          command: approval.command,
-          cwd: approval.cwd,
-          level: approval.level,
-          purpose: approval.purpose,
-          reason: approval.reason,
-        }).catch(() => {});
+        await reporter
+          .approval({
+            id: approval.id,
+            command: approval.command,
+            cwd: approval.cwd,
+            level: approval.level,
+            purpose: approval.purpose,
+            reason: approval.reason,
+          })
+          .catch(() => {});
         const approved = await promise;
         if (!approved) {
           return {
@@ -200,26 +239,21 @@ export function createBashTool(deps: BashToolDeps): AITool {
           };
         }
       } else {
-        await notify({
-          kind: "run",
-          command,
-          cwd: policy.workspaceRoot,
-          level: policy.level,
-          purpose,
-          reason: verdict.reason,
-        }).catch(() => {});
+        await reporter.announce(notice).catch(() => {});
       }
 
       const timeoutMs = Math.max(
         MIN_TIMEOUT_MS,
         Math.floor(Number(args?.timeout_ms) || config.timeoutMs),
       );
+      const startedAt = Date.now();
       try {
         const result = await execShell(
           command,
           policy.workspaceRoot,
           timeoutMs,
         );
+        reporter.record(notice, result, startedAt);
         if (result.timedOut) {
           return {
             success: false,
@@ -234,6 +268,11 @@ export function createBashTool(deps: BashToolDeps): AITool {
           stderr: result.stderr,
         };
       } catch (err) {
+        reporter.record(
+          notice,
+          { exitCode: null, timedOut: false, error: String(err) },
+          startedAt,
+        );
         return { error: `Failed to execute command: ${err}` };
       }
     },

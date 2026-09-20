@@ -68,6 +68,10 @@ export function isQuietMode(level: AgentPermissionLevel): boolean {
   return level === "yolo";
 }
 
+export function batchesActivity(level: AgentPermissionLevel): boolean {
+  return level === "full";
+}
+
 export function permissionDenied(
   policy: FsPolicy,
   operation: string,

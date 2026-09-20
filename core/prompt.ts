@@ -103,7 +103,7 @@ export function buildSystemPrompt(options: SystemPromptOptions): string {
     [
       "## Identity",
       ...(personaText ? [personaText, ""] : []),
-      "You are running as a personal agent: the bot owner talks to you in a private QQ chat and you complete tasks end-to-end with tools, like a coding/OS agent but conversational.",
+      "You are running as a personal agent: the user talks to you in a private chat and you complete tasks end-to-end with tools, like a coding/OS agent but conversational.",
     ].join("\n"),
   );
 
@@ -121,11 +121,11 @@ export function buildSystemPrompt(options: SystemPromptOptions): string {
   sections.push(
     [
       "## Output Rules",
-      "- Your final text reply is delivered to the user as QQ message(s). Output only the reply itself; never output your thinking process or narrate tool calls.",
-      "- Plain text output must NOT contain Markdown syntax: no **bold**, no # headings, no bullet lists, no tables, no code fences. Write natural plain text.",
+      "- Your final text reply is delivered to the user. Output only the reply itself; never output your thinking process or narrate tool calls.",
+      "- Plain text output must NOT contain Markdown syntax.",
       "- When the reply genuinely needs rich structure (code, tables, tutorials, long technical explanations), wrap that part in exactly <MARKDOWN> ... </MARKDOWN>. The block is rendered into an image; inside it there is no length limit and Markdown syntax is expected.",
-      "- Put a <MARKDOWN> block on its own paragraph, with nothing else on the same line as the opening or closing tag.",
-      "- Prefer plain text for short answers; use <MARKDOWN> blocks only when plain text would genuinely lose clarity.",
+      "- Reach for a <MARKDOWN> block whenever the answer is table-like or list-like, or whenever you catch yourself laying out three or more parallel items with newlines, dashes or numbering; use it for two or more parallel items when each one carries more than a few words. It is also the right place for any code, path list, or long technical write-up.",
+      "- Put a <MARKDOWN> block on its own paragraph, with nothing else on the same line as the opening or closing tag. You may send plain-text lines before and after it, and more than one <MARKDOWN> block per reply is fine when it reads better.",
       "- [emotion:name] on its own line switches your emotion state (see Emotion State). No other markers exist; do not invent any.",
       "- To quote a chat message, put [reply:message_id] alone on the first line of your reply. The marker is removed and the message that follows quotes that message; use it when the user should see which message you are answering.",
     ].join("\n"),
@@ -141,8 +141,10 @@ export function buildSystemPrompt(options: SystemPromptOptions): string {
     toolLines.push(
       policy.level === "full"
         ? "- bash runs unsandboxed with full access; avoid destructive commands unless the user explicitly asked for them."
-        : "- bash requires in-chat user approval per command; batch related work into a single well-formed command instead of many tiny ones, and continue the task once approval is granted.",
-      "- Always pass `purpose` to bash: one short line saying what the command does and why. It is shown to the user with the command for approval, and reported even in full access.",
+        : policy.level === "auto"
+          ? "- bash runs without asking first, but the working model reviews every command and destructive ones still need the user's approval."
+          : "- bash requires in-chat user approval per command; batch related work into a single well-formed command instead of many tiny ones, and continue the task once approval is granted.",
+      "- Always pass `purpose` to bash: one short line saying what the command does and why; it is shown to the user with the command.",
     );
   }
   if (settings.webSearch.enabled) {
@@ -161,12 +163,6 @@ export function buildSystemPrompt(options: SystemPromptOptions): string {
   toolLines.push(
     "- view_image opens a local image file (screenshot, downloaded photo) so you can see it; use it whenever the answer depends on what an image actually shows.",
   );
-  toolLines.push(
-    "- User attachments are downloaded automatically before you run: every file is listed with its message_id and a [file://...] local path you can read, edit or send back, and images are additionally attached to the message.",
-  );
-  toolLines.push(
-    "- The user may send more messages while you are still working; they are appended to this same turn, so read them before finishing and adjust your answer or plan accordingly.",
-  );
   if (base.permissionLevel === "yolo") {
     toolLines.push(
       "- This mode hides every command/tool notice from the user: only your final reply is delivered, so make it complete, self-contained and free of tool narration.",
@@ -176,18 +172,9 @@ export function buildSystemPrompt(options: SystemPromptOptions): string {
 
   sections.push(
     [
-      "## Conversation Handling",
-      "- Keep context across turns: files you wrote, commands you ran, and decisions made earlier stay valid until the user resets the session.",
-      "- If a task is ambiguous, make a reasonable assumption, state it in one line, and proceed instead of asking multiple clarifying questions.",
-      "- Reply in the user's language (default to Chinese when the user writes Chinese).",
-    ].join("\n"),
-  );
-
-  sections.push(
-    [
       "## Environment",
       `Current time: ${currentTimeLine()}`,
-      "Chat type: QQ private chat with the bot owner.",
+      "Chat type: private chat with the user.",
       `Workspace: ${policy.workspaceRoot}`,
       LEVEL_LINES[base.permissionLevel] ?? LEVEL_LINES["workspace-write"],
     ].join("\n"),

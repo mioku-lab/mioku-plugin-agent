@@ -5,6 +5,7 @@ import type {
   MultimodalContentItem,
   SessionToolDefinition,
 } from "mioku";
+import { UnsupportedCapabilityError } from "mioku";
 import type { AgentHost } from "../types";
 import { buildTurnTools } from "../tools";
 import { TurnSender } from "./send";
@@ -13,12 +14,14 @@ import { maybeCompact } from "./compaction";
 import { cleanEmotionMarkers, stripThinkBlocks } from "./units";
 import { describeImageUrls, extractMedia, formatMediaNote } from "./media";
 import { downloadMediaItems, readImageDataUrl } from "./download";
+import { TurnActivity } from "./activity";
 import {
   normalizePermissionLevel,
+  batchesActivity,
   isQuietMode,
   type FsPolicy,
 } from "../tools/perm";
-import type { BashNotice } from "../tools/bash";
+import type { BashReporter } from "../tools/bash";
 
 interface AgentChatMessage {
   role: "system" | "user" | "assistant" | "tool";
@@ -255,6 +258,9 @@ async function executeTurn(
   const settings = host.getSettings();
   const resolved = host.resolveModel();
   const bot: Bot | undefined = event.bot ?? host.ctx.pickBot(event.self_id);
+  const level = normalizePermissionLevel(base.permissionLevel);
+  const digestMode = batchesActivity(level);
+  const activity = new TurnActivity(digestMode);
 
   if (!resolved) {
     await replyError(host, bot, userId, "AI 服务不可用，请先在 WebUI 配置模型");
@@ -276,32 +282,47 @@ async function executeTurn(
   let toolCallCount = 0;
   let status: "ok" | "error" = "ok";
   let errorText = "";
+  activity.setSubject(input.text);
 
-  const notifyBash = async (notice: BashNotice): Promise<void> => {
-    if (!bot || isQuietMode(base.permissionLevel)) return;
-    const detail = notice.reason ? `（${notice.reason}）` : "";
-    const lines =
-      notice.kind === "approval"
-        ? [
-            `Agent 请求执行命令（${notice.level}）：`,
-            notice.command,
-            `用途：${notice.purpose}`,
-            `风险：${notice.reason || "需要审批"}`,
-            "回复 .agent approve 批准，.agent deny 拒绝",
-          ]
-        : [
-            `Agent 执行命令（${notice.level}）${detail}：`,
-            notice.command,
-            `用途：${notice.purpose}`,
-          ];
+  const sendToUser = async (text: string): Promise<void> => {
+    if (!bot) return;
     await bot.sendMessage({ type: "private", user_id: userId }, [
-      host.ctx.segment.text(lines.join("\n")),
+      host.ctx.segment.text(text),
     ]);
+  };
+
+  const reporter: BashReporter = {
+    approval: async (notice) => {
+      if (!bot || isQuietMode(level)) return;
+      await sendToUser(
+        [
+          `Agent 请求执行命令（${notice.level}）：`,
+          notice.command,
+          `用途：${notice.purpose}`,
+          `风险：${notice.reason || "需要审批"}`,
+          "回复 .agent approve 批准，.agent deny 拒绝",
+        ].join("\n"),
+      );
+    },
+    announce: async (notice) => {
+      if (!bot || isQuietMode(level) || digestMode) return;
+      const detail = notice.reason ? `（${notice.reason}）` : "";
+      await sendToUser(
+        [
+          `Agent 执行命令（${notice.level}）${detail}：`,
+          notice.command,
+          `用途：${notice.purpose}`,
+        ].join("\n"),
+      );
+    },
+    record: (notice, result, execStartedAt) => {
+      activity.recordBash(notice, result, execStartedAt);
+    },
   };
 
   try {
     host.logger.info(
-      `[agent] turn start | user=${userId} session=${session.sessionId} model=${resolved.model} level=${base.permissionLevel} files=${input.attachments} text=${truncate(input.text, 120)}`,
+      `[agent] turn start | user=${userId} session=${session.sessionId} model=${resolved.model} level=${level} files=${input.attachments} text=${truncate(input.text, 120)}`,
     );
 
     fs.mkdirSync(host.workspaceRoot(userId), { recursive: true });
@@ -313,7 +334,8 @@ async function executeTurn(
       userId,
       bot,
       runId,
-      notifyBash,
+      reporter,
+      activity,
     });
     const guardedTools = guardWebSearch(
       tools,
@@ -322,7 +344,7 @@ async function executeTurn(
     );
 
     const policy: FsPolicy = {
-      level: normalizePermissionLevel(base.permissionLevel),
+      level,
       workspaceRoot: host.workspaceRoot(userId),
     };
     const systemPrompt = buildSystemPrompt({
@@ -390,9 +412,10 @@ async function executeTurn(
         executableToolsProvider: () => guardedTools,
         steeringProvider: () => steeringMessages(host, userId, queue),
         abortSignal,
-        onTextDelta: settings.stream
-          ? (delta) => sender.onDelta(delta)
-          : undefined,
+        onTextDelta:
+          settings.stream && !digestMode
+            ? (delta) => sender.onDelta(delta)
+            : undefined,
         usageContext,
       });
     const response = resolved.instance.withUsageContext
@@ -440,7 +463,10 @@ async function executeTurn(
       }
     }
 
-    if (settings.stream) {
+    // 批量模式：把本回合的全部操作合并成一条转发记录，放在最终回复之前
+    await flushActivity(host, activity, bot, userId, event);
+
+    if (settings.stream && !digestMode) {
       await sender.finishStream(finalText);
       if (!finalText.trim()) finalText = sender.streamedText;
     } else if (finalText.trim()) {
@@ -451,12 +477,13 @@ async function executeTurn(
     }
 
     host.logger.info(
-      `[agent] turn done | user=${userId} iterations=${iterations || "?"} tools=${toolCallCount} reply=${finalText.length}chars duration=${Date.now() - startedAt}ms`,
+      `[agent] turn done | user=${userId} iterations=${iterations || "?"} tools=${toolCallCount} ops=${activity.total} reply=${finalText.length}chars duration=${Date.now() - startedAt}ms`,
     );
   } catch (err) {
     status = "error";
     errorText = String(err);
     host.logger.error(`[agent] turn failed: ${err}`);
+    await flushActivity(host, activity, bot, userId, event);
     await replyError(
       host,
       bot,
@@ -519,6 +546,38 @@ function guardWebSearch(
       },
     };
   });
+}
+
+async function flushActivity(
+  host: AgentHost,
+  activity: TurnActivity,
+  bot: Bot | undefined,
+  userId: number,
+  event: MessageEvent,
+): Promise<void> {
+  if (!bot || activity.total === 0) return;
+  const target = { type: "private" as const, user_id: userId };
+  const selfId = String(
+    event.self_id || host.ctx.bot?.bot_id || bot.bot_id || userId,
+  );
+  const nickname = host.ctx.bot?.nickname ?? "Agent";
+  const nodes = activity.buildNodes(host.ctx, selfId, nickname);
+  try {
+    await bot.sendForward(target, nodes, activity.buildDisplay());
+    host.logger.info(
+      `[agent] activity digest sent | user=${userId} nodes=${nodes.length}`,
+    );
+    return;
+  } catch (err) {
+    if (!(err instanceof UnsupportedCapabilityError)) {
+      host.logger.warn(`[agent] forward digest failed, falling back: ${err}`);
+    }
+  }
+  try {
+    await bot.sendMessage(target, activity.buildFallbackSegments(host.ctx));
+  } catch (err) {
+    host.logger.warn(`[agent] activity digest fallback failed: ${err}`);
+  }
 }
 
 async function replyError(

@@ -1,6 +1,6 @@
 import type { AITool, Bot, SessionToolDefinition } from "mioku";
 import type { AgentHost } from "../types";
-import type { BashNotice } from "./bash";
+import type { BashReporter } from "./bash";
 import type { FsToolDeps } from "./fs";
 import {
   createEditTool,
@@ -22,12 +22,14 @@ import {
 } from "./perm";
 import { describeImageFile } from "../core/media";
 import { assessCommandRisk } from "../core/risk";
+import type { TurnActivity } from "../core/activity";
 
 export interface TurnToolOptions {
   userId: number;
   bot: Bot | undefined;
   runId: number;
-  notifyBash: (notice: BashNotice) => Promise<void>;
+  reporter: BashReporter;
+  activity: TurnActivity;
 }
 
 function isToolError(result: unknown): boolean {
@@ -36,33 +38,60 @@ function isToolError(result: unknown): boolean {
   return Boolean(record.error) || record.success === false;
 }
 
-function wrapForRecording(tool: AITool, host: AgentHost, runId: number): AITool {
-  if (!host.getSettings().dataCollection.enabled || runId <= 0) return tool;
+function wrapTool(
+  tool: AITool,
+  host: AgentHost,
+  runId: number,
+  activity: TurnActivity,
+): AITool {
+  const recording = host.getSettings().dataCollection.enabled && runId > 0;
+  const tracking = tool.name !== "bash";
+  if (!recording && !tracking) return tool;
   return {
     ...tool,
     handler: async (args) => {
       const startedAt = Date.now();
       try {
         const result = await tool.handler(args);
-        host.db.recordToolCall(
-          runId,
-          tool.name,
-          args,
-          JSON.stringify(result ?? {}).length,
-          Date.now() - startedAt,
-          !isToolError(result),
-        );
+        if (recording) {
+          host.db.recordToolCall(
+            runId,
+            tool.name,
+            args,
+            JSON.stringify(result ?? {}).length,
+            Date.now() - startedAt,
+            !isToolError(result),
+          );
+        }
+        if (tracking) {
+          activity.recordTool(
+            tool.name,
+            args ?? {},
+            result,
+            Date.now() - startedAt,
+          );
+        }
         return result;
       } catch (err) {
-        host.db.recordToolCall(
-          runId,
-          tool.name,
-          args,
-          0,
-          Date.now() - startedAt,
-          false,
-          String(err),
-        );
+        if (recording) {
+          host.db.recordToolCall(
+            runId,
+            tool.name,
+            args,
+            0,
+            Date.now() - startedAt,
+            false,
+            String(err),
+          );
+        }
+        if (tracking) {
+          activity.recordTool(
+            tool.name,
+            args ?? {},
+            { error: String(err) },
+            Date.now() - startedAt,
+          );
+        }
         throw err;
       }
     },
@@ -123,7 +152,7 @@ export function buildTurnTools(
         policy,
         config: settings.bash,
         approvals: host.approvals,
-        notify: options.notifyBash,
+        reporter: options.reporter,
         assessRisk: isAutoReviewMode(policy.level)
           ? (command, purpose) => assessCommandRisk(host, command, purpose)
           : undefined,
@@ -158,7 +187,7 @@ export function buildTurnTools(
   return {
     tools: tools.map((tool) => ({
       name: tool.name,
-      tool: wrapForRecording(tool, host, options.runId),
+      tool: wrapTool(tool, host, options.runId, options.activity),
     })),
     webSearchState,
   };
