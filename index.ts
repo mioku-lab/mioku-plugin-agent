@@ -1,5 +1,5 @@
 import { definePlugin, getService, Services } from "mioku";
-import type { AIInstance, AIModelRole, MiokuContext } from "mioku";
+import type { MiokuContext } from "mioku";
 import { initDatabase } from "./db";
 import { SessionManager } from "./core/session";
 import { EmotionManager } from "./core/emotion";
@@ -9,6 +9,11 @@ import { createMessageHandler } from "./handlers/message";
 import { registerCommands } from "./commands";
 import { mergeAgentConfig } from "./utils/config";
 import { workspaceRootFor } from "./tools/perm";
+import {
+  prepareModelOverride,
+  resolveAgentModel,
+  type ModelOverride,
+} from "./core/model";
 import { BASE_CONFIG } from "./configs/base";
 import { SETTINGS_CONFIG } from "./configs/settings";
 import type {
@@ -56,12 +61,33 @@ export default definePlugin({
     );
     if (!Array.isArray(cachedBase.access.users)) cachedBase.access.users = [];
 
+    let modelOverride: ModelOverride | undefined;
+
+    const refreshOverride = async (): Promise<void> => {
+      const full = String(cachedBase.model ?? "").trim();
+      if (!full) {
+        modelOverride = undefined;
+        return;
+      }
+      const alive = modelOverride
+        ? Boolean(aiService.get?.(modelOverride.instanceName))
+        : false;
+      if (modelOverride?.key === full && alive) return;
+      modelOverride = await prepareModelOverride(aiService, full, (message) =>
+        ctx.logger.warn(`[agent] ${message}`),
+      );
+      ctx.logger.info(
+        `[agent] 覆盖模型 ${full} -> ${modelOverride ? `实例 ${modelOverride.instanceName}` : "未绑定，退回主模型"}`,
+      );
+    };
+
     const refreshBase = async () => {
       cachedBase = mergeAgentConfig(
         BASE_CONFIG,
         (await configService?.getConfig("agent", "base")) ?? {},
       );
       if (!Array.isArray(cachedBase.access.users)) cachedBase.access.users = [];
+      await refreshOverride();
     };
     const refreshSettings = async () => {
       cachedSettings = mergeAgentConfig(
@@ -69,6 +95,7 @@ export default definePlugin({
         (await configService?.getConfig("agent", "settings")) ?? {},
       );
     };
+    await refreshOverride();
     if (configService) {
       configService.onConfigChange("agent", "base", () =>
         refreshBase().catch((err) =>
@@ -89,75 +116,12 @@ export default definePlugin({
       sessions.setEmotion(userId, emotion),
     );
 
-    const resolveModel = (): ResolvedModel | null => {
-      const getByRole = (role: AIModelRole) =>
-        aiService.getInstanceByRole?.(role) ?? aiService.get?.(role);
-      const main = getByRole("main") ?? aiService.getDefault?.();
-      if (!main) return null;
-      const working = getByRole("working") ?? main;
-      const vision = getByRole("vision") ?? working;
-      const bindings = aiService.getRoleBindings?.() ?? {
-        main: undefined,
-        working: undefined,
-        vision: undefined,
-      };
-      const models = aiService.listModels?.() ?? [];
-      const instanceName = (instance: AIInstance): string | undefined => {
-        const name = (instance as { name?: unknown }).name;
-        return typeof name === "string" ? name : undefined;
-      };
-      const pickModel = (full: string | undefined, instance: AIInstance) => {
-        if (full && full.includes("/")) {
-          return full.split("/").slice(1).join("/");
-        }
-        const name = instanceName(instance);
-        const info = aiService
-          .listInstances?.()
-          ?.find((item) => item.role === name || item.name === name);
-        return info?.modelId ?? "";
-      };
-
-      const overrideFullId = String(cachedBase.model ?? "").trim();
-      const overrideDesc = overrideFullId
-        ? models.find((item) => item.id === overrideFullId)
-        : undefined;
-      let instance = main;
-      let model = pickModel(bindings.main, main) || "";
-      if (overrideDesc) {
-        model = overrideDesc.modelId;
-        const info = aiService
-          .listInstances?.()
-          ?.find((item) => item.providerId === overrideDesc.providerId);
-        const candidate = info ? aiService.get?.(info.name) : undefined;
-        if (candidate) instance = candidate;
-      } else if (overrideFullId) {
-        model = overrideFullId.includes("/")
-          ? overrideFullId.split("/").slice(1).join("/")
-          : overrideFullId;
-      }
-
-      const workingModel = pickModel(bindings.working, working) || model;
-      const visionModel = pickModel(bindings.vision, vision) || workingModel;
-      const visionDesc =
-        models.find((item) => item.id === bindings.vision) ||
-        models.find((item) => item.modelId === visionModel);
-      const isMultimodal =
-        visionDesc?.capabilities?.includes("vision") ?? Boolean(visionModel);
-      const mainDesc =
-        overrideDesc ||
-        models.find((item) => item.id === bindings.main) ||
-        models.find((item) => item.modelId === model);
-      return {
-        instance,
-        model,
-        working,
-        workingModel,
-        vision,
-        visionModel,
-        isMultimodal,
-        contextWindow: mainDesc?.contextWindow ?? 0,
-      };
-    };
+    const resolveModel = (): ResolvedModel | null =>
+      resolveAgentModel({
+        aiService,
+        overrideFullId: String(cachedBase.model ?? "").trim(),
+        override: modelOverride,
+      });
 
     const host: AgentHost = {
       ctx,
