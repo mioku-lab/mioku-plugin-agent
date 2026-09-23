@@ -34,7 +34,7 @@ export interface CompactionResult {
 
 export async function maybeCompact(
   host: AgentHost,
-  userId: number,
+  userId: string,
   options: { force?: boolean } = {},
 ): Promise<CompactionResult> {
   const settings = host.getSettings();

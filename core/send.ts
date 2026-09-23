@@ -36,7 +36,7 @@ export class TurnSender {
   constructor(
     private host: AgentHost,
     private bot: Bot | undefined,
-    private userId: number,
+    private userId: string,
     private enableScreenshot: boolean,
   ) {}
 

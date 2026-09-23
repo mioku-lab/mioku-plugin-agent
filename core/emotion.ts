@@ -8,7 +8,7 @@ function normalizeName(value: unknown): string {
 
 export class EmotionManager {
   constructor(
-    private readonly store: (userId: number, emotion: string) => void,
+    private readonly store: (userId: string, emotion: string) => void,
   ) {}
 
   available(config: ChatEmotionConfig | null): string[] {
@@ -36,7 +36,7 @@ export class EmotionManager {
   }
 
   setEmotion(
-    userId: number,
+    userId: string,
     emotion: unknown,
     config: ChatEmotionConfig | null,
   ): string {

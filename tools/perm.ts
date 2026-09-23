@@ -19,12 +19,16 @@ export function normalizePermissionLevel(value: unknown): AgentPermissionLevel {
   return "workspace-write";
 }
 
+/** 作用域键里可能含 `:`(适配器前缀),统一替换成目录安全字符 */
+const sanitizeSegment = (value: string): string =>
+  String(value ?? "").replace(/[^A-Za-z0-9._-]+/g, "_") || "unknown";
+
 export interface FsPolicy {
   level: AgentPermissionLevel;
   workspaceRoot: string;
 }
 
-export function workspaceRootFor(baseDir: string, userId: number): string {
+export function workspaceRootFor(baseDir: string, userId: string): string {
   const raw = String(baseDir ?? "").trim();
   const base =
     raw && path.isAbsolute(raw)
@@ -33,7 +37,7 @@ export function workspaceRootFor(baseDir: string, userId: number): string {
           process.cwd(),
           raw || path.join("data", "agent", "workspace"),
         );
-  return path.resolve(base, String(userId));
+  return path.resolve(base, sanitizeSegment(userId));
 }
 
 export function resolveWorkspacePath(policy: FsPolicy, target: string): string {

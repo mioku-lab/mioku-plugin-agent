@@ -19,7 +19,7 @@ export type AgentPermissionLevel =
 
 export interface AgentAccessConfig {
   allowAdmins: boolean;
-  users: number[];
+  users: string[];
 }
 
 export interface AgentBaseConfig {
@@ -104,8 +104,8 @@ export interface AgentHost {
   getSettings(): AgentSettingsConfig;
   getChatShared(): Promise<ChatSharedConfig>;
   resolveModel(): ResolvedModel | null;
-  workspaceRoot(userId: number): string;
-  isAllowed(userId: number): Promise<boolean>;
+  workspaceRoot(userId: string): string;
+  isAllowed(userId: string): Promise<boolean>;
   updateBase(patch: Partial<AgentBaseConfig>): Promise<void>;
   logger: MiokuContext["logger"];
 }

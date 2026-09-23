@@ -3,6 +3,8 @@ import * as fsp from "node:fs/promises";
 import * as path from "node:path";
 import type { Bot } from "mioku";
 import type { MediaAttachment, MediaKind } from "./media";
+import type { AgentPlatform } from "../platforms/types";
+import { EMPTY_FILE_LOOKUP } from "../platforms/types";
 
 const MAX_DOWNLOAD_BYTES = 100 * 1024 * 1024;
 const DOWNLOAD_TIMEOUT_MS = 60_000;
@@ -212,52 +214,18 @@ function candidateSources(item: MediaAttachment): string[] {
 async function platformLookup(
   bot: Bot | undefined,
   item: MediaAttachment,
+  platform: AgentPlatform | undefined,
 ): Promise<{ sources: string[]; names: string[] }> {
-  const sources: string[] = [];
-  const names: string[] = [];
-  if (!bot || !item.fileId) return { sources, names };
-
-  const attempts: Array<[string, Record<string, unknown>]> = [
-    ["get_file", { file_id: item.fileId }],
-  ];
-  if (item.groupId) {
-    attempts.push([
-      "get_group_file_url",
-      { group_id: Number(item.groupId), file_id: item.fileId },
-    ]);
+  if (!bot || !item.fileId || !platform) return EMPTY_FILE_LOOKUP;
+  try {
+    return await platform.resolveFile(bot, {
+      fileId: item.fileId,
+      groupId: item.groupId,
+      userId: item.userId,
+    });
+  } catch {
+    return EMPTY_FILE_LOOKUP;
   }
-  if (item.userId) {
-    attempts.push([
-      "get_private_file_url",
-      { user_id: Number(item.userId), file_id: item.fileId },
-    ]);
-  }
-
-  for (const [action, params] of attempts) {
-    try {
-      const result = (await bot.sendApi(action, params)) as Record<
-        string,
-        unknown
-      > | null;
-      if (!result || typeof result !== "object") continue;
-      for (const key of ["url", "file", "path"]) {
-        const value = result[key];
-        if (typeof value === "string" && value.trim())
-          sources.push(value.trim());
-      }
-      const base64 = result.base64 ?? result.data;
-      if (typeof base64 === "string" && base64.trim()) {
-        sources.push(`base64://${base64.trim()}`);
-      }
-      for (const key of ["file_name", "name"]) {
-        const value = result[key];
-        if (typeof value === "string" && value.trim()) names.push(value.trim());
-      }
-    } catch {
-      // 平台不支持该 action 时忽略，继续尝试下一个
-    }
-  }
-  return { sources, names };
 }
 
 function describeFields(item: MediaAttachment): string {
@@ -273,13 +241,14 @@ function describeFields(item: MediaAttachment): string {
 async function resolveSource(
   item: MediaAttachment,
   bot: Bot | undefined,
+  platform: AgentPlatform | undefined,
 ): Promise<{
   buffer: Buffer;
   contentType: string | null;
   fallbackName: string;
 }> {
-  const platform = await platformLookup(bot, item);
-  const candidates = [...candidateSources(item), ...platform.sources];
+  const found = await platformLookup(bot, item, platform);
+  const candidates = [...candidateSources(item), ...found.sources];
   if (candidates.length === 0) {
     throw new Error(`no downloadable source (${describeFields(item)})`);
   }
@@ -290,7 +259,7 @@ async function resolveSource(
       // 平台返回的原始文件名最可信，其次才是 URL 推断出来的名字
       return {
         ...result,
-        fallbackName: platform.names[0] ?? result.fallbackName,
+        fallbackName: found.names[0] ?? result.fallbackName,
       };
     } catch (err) {
       lastError = String(err);
@@ -302,7 +271,7 @@ async function resolveSource(
 export async function downloadMediaItems(
   items: MediaAttachment[],
   workspaceRoot: string,
-  options: { bot?: Bot } = {},
+  options: { bot?: Bot; platform?: AgentPlatform } = {},
 ): Promise<DownloadResult> {
   const dir = path.join(workspaceRoot, "download", dateStamp());
   const files: DownloadedMedia[] = [];
@@ -315,6 +284,7 @@ export async function downloadMediaItems(
       const { buffer, contentType, fallbackName } = await resolveSource(
         item,
         options.bot,
+        options.platform,
       );
       if (buffer.byteLength > MAX_DOWNLOAD_BYTES) {
         errors.push(`#${index + 1} exceeds ${MAX_DOWNLOAD_BYTES} bytes`);

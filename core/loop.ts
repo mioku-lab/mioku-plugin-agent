@@ -12,6 +12,8 @@ import { TurnSender } from "./send";
 import { buildSystemPrompt } from "./prompt";
 import { maybeCompact } from "./compaction";
 import { cleanEmotionMarkers, stripThinkBlocks } from "./units";
+import { identityOf, type AgentIdentity } from "./identity";
+import type { AgentPlatform } from "../platforms/types";
 import { describeImageUrls, extractMedia, formatMediaNote } from "./media";
 import { downloadMediaItems, readImageDataUrl } from "./download";
 import { TurnActivity } from "./activity";
@@ -42,9 +44,9 @@ interface UserQueue {
   controller: AbortController | null;
 }
 
-const queues = new Map<number, UserQueue>();
+const queues = new Map<string, UserQueue>();
 
-function getQueue(userId: number): UserQueue {
+function getQueue(userId: string): UserQueue {
   let queue = queues.get(userId);
   if (!queue) {
     queue = { running: false, inbox: [], controller: null };
@@ -55,7 +57,7 @@ function getQueue(userId: number): UserQueue {
 
 export function stopAgentTurn(
   host: AgentHost,
-  userId: number,
+  userId: string,
 ): { running: boolean; dropped: number; approvals: number } {
   const queue = queues.get(userId);
   const dropped = queue?.inbox.length ?? 0;
@@ -72,29 +74,31 @@ export function stopAgentTurn(
 function kickQueue(
   host: AgentHost,
   event: MessageEvent,
-  userId: number,
+  userId: string,
   queue: UserQueue,
 ): void {
   if (queue.running) return;
   const next = queue.inbox.shift();
   if (!next) return;
   queue.running = true;
-  void drainTurns(host, event, userId, queue, next);
+  void drainTurns(host, event, identityOf(event), queue, next);
 }
 
 export function runAgentTurn(
   host: AgentHost,
   event: MessageEvent,
+  platform: AgentPlatform,
 ): Promise<void> {
-  const userId = Number(event.user_id || event.sender?.user_id || 0);
-  if (!userId) return Promise.resolve();
+  const identity = identityOf(event);
+  if (!identity.userId) return Promise.resolve();
+  const userId = identity.scope;
   const queue = getQueue(userId);
 
   // 先占住轮次再准备输入，保证消息按到达顺序处理
   const ownsTurn = !queue.running;
   if (ownsTurn) queue.running = true;
 
-  return prepareInput(host, event, userId)
+  return prepareInput(host, event, identity, platform)
     .then((input) => {
       if (!input) {
         if (ownsTurn) {
@@ -112,7 +116,7 @@ export function runAgentTurn(
         kickQueue(host, event, userId, queue);
         return;
       }
-      return drainTurns(host, event, userId, queue, input);
+      return drainTurns(host, event, identity, queue, input);
     })
     .catch((err) => {
       if (ownsTurn) {
@@ -126,7 +130,7 @@ export function runAgentTurn(
 async function drainTurns(
   host: AgentHost,
   event: MessageEvent,
-  userId: number,
+  identity: AgentIdentity,
   queue: UserQueue,
   first: PreparedInput,
 ): Promise<void> {
@@ -135,29 +139,31 @@ async function drainTurns(
   try {
     let next: PreparedInput | undefined = first;
     while (next) {
-      await executeTurn(host, event, userId, next, queue, controller.signal);
+      await executeTurn(host, event, identity, next, queue, controller.signal);
       next = queue.inbox.shift();
     }
   } finally {
     queue.controller = null;
     queue.running = false;
-    kickQueue(host, event, userId, queue);
+    kickQueue(host, event, identity.scope, queue);
   }
 }
 
 async function prepareInput(
   host: AgentHost,
   event: MessageEvent,
-  userId: number,
+  identity: AgentIdentity,
+  platform: AgentPlatform,
 ): Promise<PreparedInput | null> {
   const resolved = host.resolveModel();
   const bot = event.bot ?? host.ctx.pickBot(event.self_id);
   const media = extractMedia(event);
   const downloads = await downloadMediaItems(
     media,
-    host.workspaceRoot(userId),
+    host.workspaceRoot(identity.scope),
     {
       bot,
+      platform,
     },
   ).catch((err) => {
     host.logger.warn(`[agent] attachment download failed: ${err}`);
@@ -216,7 +222,7 @@ async function prepareInput(
 
 function steeringMessages(
   host: AgentHost,
-  userId: number,
+  userId: string,
   queue: UserQueue,
 ): AgentChatMessage[] {
   if (queue.inbox.length === 0) return [];
@@ -249,11 +255,13 @@ function steeringContent(
 async function executeTurn(
   host: AgentHost,
   event: MessageEvent,
-  userId: number,
+  identity: AgentIdentity,
   input: PreparedInput,
   queue: UserQueue,
   abortSignal: AbortSignal,
 ): Promise<void> {
+  const userId = identity.scope;
+  const sendUserId = identity.userId;
   const base = host.getBase();
   const settings = host.getSettings();
   const resolved = host.resolveModel();
@@ -263,7 +271,7 @@ async function executeTurn(
   const activity = new TurnActivity(digestMode);
 
   if (!resolved) {
-    await replyError(host, bot, userId, "AI 服务不可用，请先在 WebUI 配置模型");
+    await replyError(host, bot, sendUserId, "AI 服务不可用，请先在 WebUI 配置模型");
     return;
   }
 
@@ -286,7 +294,7 @@ async function executeTurn(
 
   const sendToUser = async (text: string): Promise<void> => {
     if (!bot) return;
-    await bot.sendMessage({ type: "private", user_id: userId }, [
+    await bot.sendMessage({ type: "private", user_id: sendUserId }, [
       host.ctx.segment.text(text),
     ]);
   };
@@ -332,6 +340,7 @@ async function executeTurn(
 
     const { tools, webSearchState } = buildTurnTools(host, {
       userId,
+      sendUserId,
       bot,
       runId,
       reporter,
@@ -390,15 +399,15 @@ async function executeTurn(
     const sender = new TurnSender(
       host,
       bot,
-      userId,
+      sendUserId,
       settings.enableMarkdownScreenshot && Boolean(host.screenshot),
     );
     const usageId = `agent:${sessionRow.sessionId}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
     const usageContext = {
       usageId,
       source: "agent",
-      botId: Number(event?.self_id) || undefined,
-      userId,
+      botId: identity.botId || undefined,
+      userId: sendUserId,
       sessionId: sessionRow.sessionId,
     };
 
@@ -464,7 +473,7 @@ async function executeTurn(
     }
 
     // 批量模式：把本回合的全部操作合并成一条转发记录，放在最终回复之前
-    await flushActivity(host, activity, bot, userId, event);
+    await flushActivity(host, activity, bot, sendUserId, event);
 
     if (settings.stream && !digestMode) {
       await sender.finishStream(finalText);
@@ -483,11 +492,11 @@ async function executeTurn(
     status = "error";
     errorText = String(err);
     host.logger.error(`[agent] turn failed: ${err}`);
-    await flushActivity(host, activity, bot, userId, event);
+    await flushActivity(host, activity, bot, sendUserId, event);
     await replyError(
       host,
       bot,
-      userId,
+      sendUserId,
       `Agent 处理出错：${errorText.slice(0, 300)}`,
     );
   } finally {
@@ -552,15 +561,13 @@ async function flushActivity(
   host: AgentHost,
   activity: TurnActivity,
   bot: Bot | undefined,
-  userId: number,
+  userId: string,
   event: MessageEvent,
 ): Promise<void> {
   if (!bot || activity.total === 0) return;
   const target = { type: "private" as const, user_id: userId };
-  const selfId = String(
-    event.self_id || host.ctx.bot?.bot_id || bot.bot_id || userId,
-  );
-  const nickname = host.ctx.bot?.nickname ?? "Agent";
+  const selfId = String(event.self_id || bot.bot_id || userId);
+  const nickname = bot.nickname ?? "Agent";
   const nodes = activity.buildNodes(host.ctx, selfId, nickname);
   try {
     await bot.sendForward(target, nodes, activity.buildDisplay());
@@ -583,7 +590,7 @@ async function flushActivity(
 async function replyError(
   host: AgentHost,
   bot: Bot | undefined,
-  userId: number,
+  userId: string,
   text: string,
 ): Promise<void> {
   if (!bot) return;

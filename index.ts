@@ -5,7 +5,7 @@ import { SessionManager } from "./core/session";
 import { EmotionManager } from "./core/emotion";
 import { ApprovalManager } from "./tools/approval";
 import { readChatSharedConfig } from "./core/chat-config";
-import { createMessageHandler } from "./handlers/message";
+import { registerAgentPlatforms } from "./platforms";
 import { registerCommands } from "./commands";
 import { mergeAgentConfig } from "./utils/config";
 import { workspaceRootFor } from "./tools/perm";
@@ -23,13 +23,13 @@ import type {
   ResolvedModel,
 } from "./types";
 
-function normalizeIdList(input: unknown): number[] {
+function normalizeIdList(input: unknown): string[] {
   if (!Array.isArray(input)) return [];
   return Array.from(
     new Set(
       input
-        .map((item) => Math.floor(Number(item)))
-        .filter((id) => Number.isFinite(id) && id > 0),
+        .map((item) => String(item ?? "").trim())
+        .filter((id) => id.length > 0),
     ),
   );
 }
@@ -136,18 +136,18 @@ export default definePlugin({
       getSettings: () => cachedSettings,
       getChatShared: () => readChatSharedConfig(configService),
       resolveModel,
-      workspaceRoot: (userId: number) =>
+      workspaceRoot: (userId: string) =>
         workspaceRootFor(cachedBase.workspaceDir, userId),
-      isAllowed: async (userId: number) => {
-        const owners = (ctx.config.owners ?? []).map(Number);
-        if (owners.includes(userId)) return true;
-        if (
-          cachedBase.access.allowAdmins &&
-          (ctx.config.admins ?? []).map(Number).includes(userId)
-        ) {
+      isAllowed: async (userId: string) => {
+        const target = String(userId ?? "").trim();
+        if (!target) return false;
+        const matches = (list: readonly unknown[] | undefined): boolean =>
+          (list ?? []).some((item) => String(item ?? "").trim() === target);
+        if (matches(ctx.config.owners)) return true;
+        if (cachedBase.access.allowAdmins && matches(ctx.config.admins)) {
           return true;
         }
-        return normalizeIdList(cachedBase.access.users).includes(userId);
+        return normalizeIdList(cachedBase.access.users).includes(target);
       },
       updateBase: async (patch) => {
         if (configService) {
@@ -160,7 +160,7 @@ export default definePlugin({
     };
 
     registerCommands(host);
-    ctx.handle("message", createMessageHandler(host));
+    const disposePlatforms = registerAgentPlatforms(ctx, host);
 
     const resolved = resolveModel();
     ctx.logger.info(
@@ -168,6 +168,7 @@ export default definePlugin({
     );
 
     return () => {
+      disposePlatforms();
       approvals.dispose();
       db.close();
       ctx.logger.info("agent 插件已卸载");

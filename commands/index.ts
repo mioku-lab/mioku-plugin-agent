@@ -4,15 +4,16 @@ import type { SessionPlanItem } from "../db";
 import { maybeCompact } from "../core/compaction";
 import { generateSessionTitle } from "../core/title";
 import { stopAgentTurn } from "../core/loop";
+import { identityOf } from "../core/identity";
 import { PERMISSION_LEVELS } from "../tools/perm";
 
 const CLEAR_CONFIRM_TTL_MS = 60_000;
 
 const resumeListCache = new Map<
-  number,
+  string,
   { generations: number[]; at: number }
 >();
-const pendingClear = new Map<number, number>();
+const pendingClear = new Map<string, number>();
 
 async function reply(event: MessageEvent, text: string): Promise<void> {
   await event.reply(text, true);
@@ -21,12 +22,12 @@ async function reply(event: MessageEvent, text: string): Promise<void> {
 async function requireUser(
   host: AgentHost,
   event: MessageEvent,
-): Promise<number> {
-  const userId = Number(event.user_id || event.sender?.user_id || 0);
-  if (!userId) {
-    await reply(event, "agent 命令需要在 QQ 私聊中使用");
+): Promise<string> {
+  const identity = identityOf(event);
+  if (!identity.userId) {
+    await reply(event, "agent 命令需要在私聊中使用");
   }
-  return userId;
+  return identity.scope;
 }
 
 function formatTime(ts: number): string {
@@ -56,7 +57,7 @@ async function backgroundTitle(
   host.logger.info(`[agent] session ${sessionId} titled: ${title}`);
 }
 
-function cachedResumable(host: AgentHost, userId: number): number[] {
+function cachedResumable(host: AgentHost, userId: string): number[] {
   const cached = resumeListCache.get(userId);
   if (cached && Date.now() - cached.at < 5 * 60_000) return cached.generations;
   const current = host.sessions.sessionId(userId);
@@ -67,7 +68,7 @@ function cachedResumable(host: AgentHost, userId: number): number[] {
   return generations;
 }
 
-function invalidateResumeCache(userId: number): void {
+function invalidateResumeCache(userId: string): void {
   resumeListCache.delete(userId);
 }
 

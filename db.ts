@@ -18,6 +18,14 @@ function rowString(row: SqlRow, key: string, fallback = ""): string {
   return typeof value === "string" ? value : fallback;
 }
 
+/** id 列可能是 TEXT(openid)也可能是 INTEGER 亲和存下的数字,统一转字符串 */
+function rowId(row: SqlRow | null | undefined, key: string, fallback = ""): string {
+  const value = row?.[key];
+  if (value == null) return fallback;
+  const text = String(value);
+  return text.length > 0 ? text : fallback;
+}
+
 export type SessionPlanStatus = "pending" | "in_progress" | "completed";
 
 export interface SessionPlanItem {
@@ -27,7 +35,7 @@ export interface SessionPlanItem {
 
 export interface AgentSessionRow {
   sessionId: string;
-  userId: number;
+  userId: string;
   generation: number;
   emotion: string;
   summary: string;
@@ -51,7 +59,7 @@ export interface AgentMessageRow {
 export interface AgentRunRow {
   id: number;
   sessionId: string;
-  userId: number;
+  userId: string;
   model: string;
   status: "ok" | "error";
   iterations: number;
@@ -93,7 +101,7 @@ export class AgentDatabase {
     this.db.run(`
       CREATE TABLE IF NOT EXISTS sessions (
         session_id TEXT PRIMARY KEY,
-        user_id INTEGER NOT NULL,
+        user_id TEXT NOT NULL,
         generation INTEGER NOT NULL DEFAULT 0,
         emotion TEXT NOT NULL DEFAULT '',
         summary TEXT NOT NULL DEFAULT '',
@@ -106,7 +114,7 @@ export class AgentDatabase {
         updated_at INTEGER NOT NULL
       );
       CREATE TABLE IF NOT EXISTS user_state (
-        user_id INTEGER PRIMARY KEY,
+        user_id TEXT PRIMARY KEY,
         generation INTEGER NOT NULL DEFAULT 0,
         updated_at INTEGER NOT NULL
       );
@@ -121,7 +129,7 @@ export class AgentDatabase {
       CREATE TABLE IF NOT EXISTS runs (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         session_id TEXT NOT NULL,
-        user_id INTEGER NOT NULL,
+        user_id TEXT NOT NULL,
         model TEXT NOT NULL DEFAULT '',
         status TEXT NOT NULL DEFAULT 'ok',
         iterations INTEGER NOT NULL DEFAULT 0,
@@ -142,23 +150,55 @@ export class AgentDatabase {
         created_at INTEGER NOT NULL
       );
     `);
+    this.#widenLegacyIdColumns();
   }
 
-  getUserGeneration(userId: number): number {
+  /**
+   * 旧库的 user_state.user_id 是 INTEGER PRIMARY KEY(rowid 别名),
+   * 写入 openid 会直接抛 SQLiteError: datatype mismatch,这里重建成 TEXT。
+   */
+  #widenLegacyIdColumns(): void {
+    const info = this.db
+      .query("PRAGMA table_info(user_state)")
+      .all() as Array<{ name?: string; type?: string }>;
+    const column = info.find((item) => item.name === "user_id");
+    if (!column || String(column.type ?? "").toUpperCase() === "TEXT") return;
+
+    this.db.run("BEGIN");
+    try {
+      this.db.run("ALTER TABLE user_state RENAME TO user_state_legacy");
+      this.db.run(`
+        CREATE TABLE user_state (
+          user_id TEXT PRIMARY KEY,
+          generation INTEGER NOT NULL DEFAULT 0,
+          updated_at INTEGER NOT NULL
+        );
+        INSERT INTO user_state (user_id, generation, updated_at)
+          SELECT CAST(user_id AS TEXT), generation, updated_at FROM user_state_legacy;
+        DROP TABLE user_state_legacy;
+      `);
+      this.db.run("COMMIT");
+    } catch (err) {
+      this.db.run("ROLLBACK");
+      throw err;
+    }
+  }
+
+  getUserGeneration(userId: string): number {
     const row = this.db
       .query("SELECT generation FROM user_state WHERE user_id = ?")
       .get(userId) as SqlRow | null;
     return rowNumber(row, "generation", 0);
   }
 
-  maxGeneration(userId: number): number {
+  maxGeneration(userId: string): number {
     const row = this.db
       .query("SELECT MAX(generation) AS max FROM sessions WHERE user_id = ?")
       .get(userId) as SqlRow | null;
     return rowNumber(row, "max", -1);
   }
 
-  bumpUserGenerationTo(userId: number, generation: number): void {
+  bumpUserGenerationTo(userId: string, generation: number): void {
     this.db.run(
       `INSERT INTO user_state (user_id, generation, updated_at) VALUES (?, ?, ?)
        ON CONFLICT(user_id) DO UPDATE SET generation = ?, updated_at = ?`,
@@ -166,7 +206,7 @@ export class AgentDatabase {
     );
   }
 
-  getOrCreateSession(sessionId: string, userId: number): AgentSessionRow {
+  getOrCreateSession(sessionId: string, userId: string): AgentSessionRow {
     const now = Date.now();
     this.db.run(
       `INSERT INTO sessions (session_id, user_id, generation, created_at, updated_at)
@@ -181,7 +221,7 @@ export class AgentDatabase {
   }
 
   getSessionByGeneration(
-    userId: number,
+    userId: string,
     generation: number,
   ): AgentSessionRow | undefined {
     const row = this.db
@@ -191,7 +231,7 @@ export class AgentDatabase {
   }
 
   listSessions(
-    userId: number,
+    userId: string,
     options: { archived?: boolean } = {},
   ): AgentSessionRow[] {
     const rows = options.archived === undefined
@@ -314,7 +354,7 @@ export class AgentDatabase {
   }
 
   /** 删除该用户的全部会话（含归档）及其消息、运行记录与工具调用明细。 */
-  clearUserSessions(userId: number): ClearSessionsResult {
+  clearUserSessions(userId: string): ClearSessionsResult {
     const ids = this.listSessions(userId).map((session) => session.sessionId);
     const result: ClearSessionsResult = {
       sessions: ids.length,
@@ -360,7 +400,7 @@ export class AgentDatabase {
     return rowNumber(row, "count", 0);
   }
 
-  startRun(sessionId: string, userId: number, model: string): number {
+  startRun(sessionId: string, userId: string, model: string): number {
     const result = this.db
       .query(
         "INSERT INTO runs (session_id, user_id, model, started_at) VALUES (?, ?, ?, ?)",
@@ -408,7 +448,7 @@ export class AgentDatabase {
       );
   }
 
-  getRunStats(userId: number): { runs: number; toolCalls: number } {
+  getRunStats(userId: string): { runs: number; toolCalls: number } {
     const runRow = this.db
       .query("SELECT COUNT(*) AS count FROM runs WHERE user_id = ?")
       .get(userId) as SqlRow | null;
@@ -449,7 +489,7 @@ function toSessionRow(row: SqlRow): AgentSessionRow {
   const sessionId = rowString(row, "session_id");
   return {
     sessionId,
-    userId: rowNumber(row, "user_id", 0),
+    userId: rowId(row, "user_id"),
     generation: rowNumber(row, "generation", parseGeneration(sessionId)),
     emotion: rowString(row, "emotion"),
     summary: rowString(row, "summary"),

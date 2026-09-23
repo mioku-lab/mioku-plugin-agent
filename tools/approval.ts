@@ -2,7 +2,7 @@ import type { AgentPermissionLevel } from "../types";
 
 export interface PendingApproval {
   id: string;
-  userId: number;
+  userId: string;
   command: string;
   cwd: string;
   level: AgentPermissionLevel;
@@ -18,7 +18,7 @@ interface PendingEntry extends PendingApproval {
 
 export class ApprovalManager {
   private pending = new Map<string, PendingEntry>();
-  private latestByUser = new Map<number, string>();
+  private latestByUser = new Map<string, string>();
   private seq = 0;
 
   create(
@@ -55,7 +55,7 @@ export class ApprovalManager {
     return true;
   }
 
-  resolveLatest(userId: number, approved: boolean): PendingApproval | null {
+  resolveLatest(userId: string, approved: boolean): PendingApproval | null {
     const id = this.latestByUser.get(userId) ?? this.latestFor(userId);
     if (!id) return null;
     const entry = this.pending.get(id);
@@ -65,13 +65,13 @@ export class ApprovalManager {
     return approval;
   }
 
-  latestByUserId(userId: number): PendingApproval | null {
+  latestByUserId(userId: string): PendingApproval | null {
     const id = this.latestByUser.get(userId) ?? this.latestFor(userId);
     const entry = id ? this.pending.get(id) : undefined;
     return entry ? this.toPending(entry) : null;
   }
 
-  cancelByUser(userId: number): number {
+  cancelByUser(userId: string): number {
     const ids = [...this.pending.values()]
       .filter((entry) => entry.userId === userId)
       .map((entry) => entry.id);
@@ -79,7 +79,7 @@ export class ApprovalManager {
     return ids.length;
   }
 
-  listByUser(userId: number): PendingApproval[] {
+  listByUser(userId: string): PendingApproval[] {
     return [...this.pending.values()]
       .filter((entry) => entry.userId === userId)
       .sort((a, b) => a.createdAt - b.createdAt)
@@ -95,7 +95,7 @@ export class ApprovalManager {
     this.latestByUser.clear();
   }
 
-  private latestFor(userId: number): string | undefined {
+  private latestFor(userId: string): string | undefined {
     let latest: PendingEntry | undefined;
     for (const entry of this.pending.values()) {
       if (entry.userId !== userId) continue;

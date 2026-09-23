@@ -1,13 +1,19 @@
 import type { MessageEvent } from "mioku";
 import type { AgentHost } from "../types";
+import { identityOf } from "../core/identity";
 import { runAgentTurn } from "../core/loop";
+import { genericPlatform } from "../platforms/generic";
+import type { AgentPlatform } from "../platforms/types";
 
-export function createMessageHandler(host: AgentHost) {
-  return async (e: MessageEvent) => {
-    if (e.message_type === "group") return;
-    const userId = Number(e.user_id || e.sender?.user_id || 0);
-    if (!userId || userId === Number(e.self_id || 0)) return;
-    if (!(await host.isAllowed(userId))) return;
-    await runAgentTurn(host, e);
-  };
+/** 各平台分支共用的入口：权限/自消息过滤后进入 agent 轮次 */
+export async function handleAgentMessage(
+  host: AgentHost,
+  event: MessageEvent,
+  platform: AgentPlatform = genericPlatform,
+): Promise<void> {
+  if (event.message_type === "group") return;
+  const identity = identityOf(event);
+  if (!identity.userId || identity.userId === identity.botId) return;
+  if (!(await host.isAllowed(identity.userId))) return;
+  await runAgentTurn(host, event, platform);
 }

@@ -12,11 +12,11 @@
   - `auto` 自动：文件与命令直接执行，但**每条命令先由工作模型审查**，危险操作（删除用户文件、清库、`git push`、sudo 等）转用户审批；执行通知与审批请求都即时推送
   - `full` 完全访问：不审批，命令与写入/编辑汇总成一条转发记录
   - `yolo` 静默：权限最高且**不推送任何中间通知**，用户只收到最终结果
-- **个人工作区**：每个 QQ 号独立工作区，默认 `data/agent/workspace/<qq号>`
+- **个人工作区**：每个「适配器 + 用户」独立工作区，默认 `data/agent/workspace/<适配器>_<用户id>`（openid 平台同样隔离）
 - **聊天内审批**：非 full 权限档下 bash 命令需 `.agent approve` 批准（不带 id 时处理该用户最近一次请求）；每条命令都必须带 `purpose`，审批与执行告知都会带上用途
 - **操作合并转发**（仅 `full`）：命令、写入、编辑不再逐条推送，而是攒到本轮结束、在最终回复**之前**合并成一条合并转发消息（卡片来源「Agent 执行记录」，外显小字是操作条数与用户请求摘要，总摘要是各类操作计数与失败数；首节点为简介，其余节点按时间顺序记录每条命令/文件改动，含用途、耗时与失败输出）。适配器不支持转发时自动降级为普通文本消息。`read`/`glob`/`grep`/联网/看图等只读操作不记录。`auto` 不合并，仍逐条即时推送
 - **工具面**：read / write / edit / glob / grep / bash / view_image / send_file / send_image / web_search (SearXNG) / web_fetch / todo_write
-- **附件自动下载**：用户发来的图片/文件/音视频统一按文件自动落到 `download/<今天日期>/`，**保留原始文件名与后缀**（`file_name` → segment 的 `file` → `path` → URL 文件名，缺后缀才用 content-type 补）；user 消息里带 `message_id`、`name` 和 `[file://路径]`，图片额外作为图片内容附加给模型。QQ 文件消息只有 `file_id` 时按平台 API（`get_file` / `get_group_file_url` / `get_private_file_url`）换取下载地址与原始文件名
+- **附件自动下载**：用户发来的图片/文件/音视频统一按文件自动落到 `download/<今天日期>/`，**保留原始文件名与后缀**（`file_name` → segment 的 `file` → `path` → URL 文件名，缺后缀才用 content-type 补）；user 消息里带 `message_id`、`name` 和 `[file://路径]`，图片额外作为图片内容附加给模型。文件消息只有 `file_id` 时按平台分支解析下载地址，见下
 - **消息引用**：模型在回复首行写 `[reply:message_id]` 即可引用（回复）指定聊天消息，标记会被移除并只作用于本轮第一条消息
 - **运行中插话**：Agent 正在跑时用户继续发消息，不再排队等下一轮，而是并入**当前请求**的下一次迭代（DSH 式 steering），模型在同一个回复里就能看到并调整；日志里 `steer queued` 表示已入队、`steer merged into running turn` 表示已并入本轮请求
 - **看图**：`view_image` 查看本地图片；多模态主模型直接把图片附加进对话，非多模态时交给视觉模型转成描述

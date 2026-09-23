@@ -8,7 +8,7 @@ import { sendImageSource, sendLocalFile } from "../core/attachment";
 interface DeliverToolDeps {
   ctx: MiokuContext;
   bot: Bot | undefined;
-  userId: number;
+  userId: string;
   policy: FsPolicy;
 }
 

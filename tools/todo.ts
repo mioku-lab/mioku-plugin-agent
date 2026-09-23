@@ -38,12 +38,15 @@ export function formatPlanText(items: SessionPlanItem[]): string {
 
 export function createTodoTool(options: {
   host: AgentHost;
-  userId: number;
+  /** 会话隔离键 */
+  userId: string;
+  /** 平台原始用户 id,用于推送 */
+  sendUserId: string;
   bot: Bot | undefined;
   /** yolo 模式：不推送清单，用户只看最终回复 */
   quiet?: boolean;
 }): AITool {
-  const { host, userId, bot, quiet } = options;
+  const { host, userId, sendUserId, bot, quiet } = options;
   return {
     name: "todo_write",
     description: DESCRIPTION,
@@ -114,7 +117,7 @@ export function createTodoTool(options: {
       if (bot && !quiet) {
         await bot
           .sendMessage(
-            { type: "private", user_id: userId },
+            { type: "private", user_id: sendUserId },
             [host.ctx.segment.text(formatPlanText(items))],
           )
           .catch((err) =>

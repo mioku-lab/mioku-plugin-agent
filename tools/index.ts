@@ -25,7 +25,10 @@ import { assessCommandRisk } from "../core/risk";
 import type { TurnActivity } from "../core/activity";
 
 export interface TurnToolOptions {
-  userId: number;
+  /** 会话/工作区隔离键(适配器 + 平台用户 id) */
+  userId: string;
+  /** 平台原始用户 id,用于发送消息 */
+  sendUserId: string;
   bot: Bot | undefined;
   runId: number;
   reporter: BashReporter;
@@ -120,13 +123,13 @@ export function buildTurnTools(
     createSendFileTool({
       ctx: host.ctx,
       bot: options.bot,
-      userId: options.userId,
+      userId: options.sendUserId,
       policy,
     }),
     createSendImageTool({
       ctx: host.ctx,
       bot: options.bot,
-      userId: options.userId,
+      userId: options.sendUserId,
       policy,
     }),
   ];
@@ -175,6 +178,7 @@ export function buildTurnTools(
     createTodoTool({
       host,
       userId: options.userId,
+      sendUserId: options.sendUserId,
       bot: options.bot,
       quiet: isQuietMode(policy.level),
     }),

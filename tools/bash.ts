@@ -47,7 +47,7 @@ export interface BashReporter {
 }
 
 interface BashToolDeps {
-  userId: number;
+  userId: string;
   policy: FsPolicy;
   config: BashConfig;
   approvals: ApprovalManager;
