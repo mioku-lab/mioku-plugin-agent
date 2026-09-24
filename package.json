@@ -1,6 +1,6 @@
 {
   "name": "mioku-plugin-agent",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "超级用户 Agent 插件",
   "main": "index.ts",
   "type": "module",
